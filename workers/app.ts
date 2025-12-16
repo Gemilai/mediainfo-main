@@ -25,26 +25,20 @@ export default {
     ) {
       const targetUrl = url.searchParams.get('url');
 
-      // CORS headers
       const corsHeaders = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
         'Access-Control-Allow-Headers': 'Range, Content-Type, User-Agent',
         'Access-Control-Expose-Headers':
-          'Content-Length, Content-Range, Content-Type, Accept-Ranges, Content-Disposition',
+          'Content-Length, Content-Range, Content-Type, Accept-Ranges',
       };
 
       if (request.method === 'OPTIONS') {
-        return new Response(null, {
-          headers: corsHeaders,
-        });
+        return new Response(null, { headers: corsHeaders });
       }
 
       if (!targetUrl) {
-        return new Response("Missing 'url' query parameter", {
-          status: 400,
-          headers: corsHeaders,
-        });
+        return new Response("Missing 'url'", { status: 400, headers: corsHeaders });
       }
 
       try {
@@ -64,15 +58,10 @@ export default {
 
         const responseHeaders = new Headers();
         
-        // Copy Headers (Blocklist approach for maximum compatibility)
+        // Copy safe headers
         const skipHeaders = [
-          'content-encoding', 
-          'content-length', 
-          'transfer-encoding', 
-          'connection', 
-          'keep-alive',
-          'content-disposition', // We handle this manually
-          'content-type'         // We handle this manually
+          'content-encoding', 'content-length', 'transfer-encoding', 
+          'connection', 'keep-alive', 'content-disposition', 'content-type'
         ];
 
         for (const [key, value] of upstreamResponse.headers.entries()) {
@@ -81,11 +70,13 @@ export default {
           }
         }
 
-        // --- IDM FIX: Force browser to treat as stream, not file ---
-        responseHeaders.delete('content-disposition');
+        // --- ANTI-DOWNLOAD MEASURES ---
+        // 1. Force generic binary type (hides "video/mp4" from IDM)
         responseHeaders.set('content-type', 'application/octet-stream');
+        // 2. Remove attachment disposition
+        responseHeaders.delete('content-disposition');
 
-        // Restore Critical Headers
+        // Restore critical sizing headers
         if (upstreamResponse.headers.has('Content-Length')) {
           responseHeaders.set('Content-Length', upstreamResponse.headers.get('Content-Length')!);
         }
@@ -93,7 +84,6 @@ export default {
           responseHeaders.set('Content-Range', upstreamResponse.headers.get('Content-Range')!);
         }
 
-        // CORS
         Object.entries(corsHeaders).forEach(([key, value]) => {
           responseHeaders.set(key, value);
         });
@@ -104,15 +94,10 @@ export default {
           headers: responseHeaders,
         });
       } catch (error) {
-        return new Response(
-          `Proxy error: ${
-            error instanceof Error ? error.message : 'Unknown error'
-          }`,
-          {
-            status: 502,
-            headers: corsHeaders,
-          },
-        );
+        return new Response(`Proxy error: ${error instanceof Error ? error.message : 'Unknown'}`, {
+          status: 502,
+          headers: corsHeaders,
+        });
       }
     }
 
