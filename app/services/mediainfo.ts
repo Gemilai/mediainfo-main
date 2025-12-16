@@ -1,9 +1,5 @@
-import type { MediaInfo, ReadChunkFunc } from 'mediainfo.js';
+import type { MediaInfo } from 'mediainfo.js';
 
-// type MediaInfoCallback removed as it was unused
-
-// We need to define the type for the MediaInfo factory function
-// strictly speaking it's on window or imported, but for dynamic import:
 type MediaInfoFactory = (opts: {
   format: 'text' | 'json' | 'object' | 'XML' | 'MAXML' | 'HTML' | string;
   coverData: boolean;
@@ -20,225 +16,143 @@ export async function analyzeMedia(
   // --- 1. Validation Phase ---
   onStatus('Validating URL...');
 
-  const SUPPORTED_EXTENSIONS = {
-    video: [
-      'mkv',
-      'mp4',
-      'avi',
-      'mov',
-      'webm',
-      'flv',
-      'wmv',
-      'm4v',
-      '3gp',
-      'ts',
-      'mts',
-      'm2ts',
-      'vob',
-      'ogv',
-    ],
-    audio: [
-      'mp3',
-      'wav',
-      'aac',
-      'flac',
-      'ogg',
-      'm4a',
-      'wma',
-      'alac',
-      'opus',
-      'mid',
-      'midi',
-    ],
-    image: [
-      'jpg',
-      'jpeg',
-      'png',
-      'gif',
-      'bmp',
-      'webp',
-      'svg',
-      'tiff',
-      'ico',
-      'heic',
-    ],
-  };
-
-  // Helper to extract filename from Content-Disposition
-  const getFilenameFromHeader = (header: string | null): string | null => {
-    if (!header) return null;
-    const matches = /filename="?([^"]+)"?/.exec(header);
-    return matches ? matches[1] : null;
-  };
-
-  // Perform HEAD request for validation
-  const response = await fetch(
-    `/resources/proxy?url=${encodeURIComponent(url)}`,
-    { method: 'HEAD' },
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch metadata (HEAD): ${response.status} ${response.statusText}`,
-    );
+  // Basic URL check
+  try {
+    new URL(url);
+  } catch {
+    throw new Error('Invalid URL format');
   }
 
-  const contentDisposition = response.headers.get('Content-Disposition');
-  const filename = getFilenameFromHeader(contentDisposition);
+  // Use our proxy endpoint
+  const PROXY_ENDPOINT = '/resources/proxy';
+  const proxyUrl = `${PROXY_ENDPOINT}?url=${encodeURIComponent(url)}`;
 
-  if (!filename) {
-    // If no filename in header, maybe try URL path?
-    // The user specifically asked to check Content-Disposition "because it will easily tell".
-    // If it's missing, we might want to strict fail or fallback.
-    // Strict fail seems safer based on "we must check... content-disposition".
-    throw new Error(
-      'Cannot determine filename. Server must provide "Content-Disposition" header with a filename.',
-    );
+  // --- 2. Load MediaInfo Module ---
+  // We dynamic import only when needed
+  onStatus('Loading MediaInfo engine...');
+  let mediainfoModule: any;
+  try {
+    // @ts-expect-error - mediainfo.js might not have perfect types
+    mediainfoModule = await import('mediainfo.js');
+  } catch (e) {
+    throw new Error('Failed to load MediaInfo WASM module.');
   }
 
-  const extension = filename.split('.').pop()?.toLowerCase();
-
-  if (!extension) {
-    throw new Error(
-      `Cannot determine file extension from filename: "${filename}"`,
-    );
-  }
-
-  const isVideo = SUPPORTED_EXTENSIONS.video.includes(extension);
-  const isAudio = SUPPORTED_EXTENSIONS.audio.includes(extension);
-  const isImage = SUPPORTED_EXTENSIONS.image.includes(extension);
-
-  if (!isVideo && !isAudio && !isImage) {
-    throw new Error(
-      `Unsupported file type: ".${extension}". Only Video, Audio, and Image files are allowed.`,
-    );
-  }
-
-  onStatus(`Detected valid file: ${filename}`);
-
-  // --- 2. Dynamic Import & Setup ---
-  onStatus('Loading MediaInfo WASM...');
-  const mediainfoModule = await import('mediainfo.js');
-  // mediainfoModule.default or mediainfoModule check
-  const mediaInfoFactory = (mediainfoModule.default ||
-    mediainfoModule) as unknown as MediaInfoFactory;
+  const mediaInfoFactory = mediainfoModule.default as MediaInfoFactory;
 
   const mediainfo = await mediaInfoFactory({
-    format: format, // 'format' is string, and MediaInfoFactory accepts string
+    format,
     coverData: false,
-    full: false, // Set to false to avoid deep scan/parsing of all frames
-    locateFile: () => '/MediaInfoModule.wasm',
+    full: true,
+    locateFile: (path: string) => `/${path}`, // points to public/MediaInfoModule.wasm
   });
 
   try {
-    let fileSize = 0;
-    let cache: { start: number; data: Uint8Array } | null = null;
-    const PREFETCH_SIZE = 2 * 1024 * 1024; // 2MB chunk size for prefetching
+    // --- 3. Define IO Handlers ---
 
+    // A smart getSize that avoids HEAD requests (which cause 405 errors)
     const getSize = async (): Promise<number> => {
-      // Reuse the size from the validation response if possible?
-      // The validation response body is already consumed/closed (HEAD has no body),
-      // but we have the headers from 'response'.
-      // Let's use the headers we already fetched to avoid a second network request!
-      const contentLength = response.headers.get('Content-Length');
-      if (!contentLength) {
-        throw new Error('Content-Length header missing');
+      onStatus('Checking file size...');
+
+      // Instead of HEAD, we use GET with Range: bytes=0-0.
+      // This is safer because many servers block HEAD but allow GET.
+      const response = await fetch(proxyUrl, {
+        method: 'GET',
+        headers: {
+          Range: 'bytes=0-0',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to connect: ${response.status} ${response.statusText}`);
       }
-      const size = parseInt(contentLength, 10);
-      fileSize = size;
-      onStatus(`File size: ${(size / (1024 * 1024)).toFixed(2)} MB`);
-      return size;
+
+      // 1. Try to get size from Content-Range (Standard for Range requests)
+      // Format: bytes 0-0/123456 -> we want 123456
+      const contentRange = response.headers.get('Content-Range');
+      if (contentRange) {
+        const match = contentRange.match(/\/(\d+)$/);
+        if (match) {
+          return parseInt(match[1], 10);
+        }
+      }
+
+      // 2. Fallback to Content-Length
+      const contentLength = response.headers.get('Content-Length');
+      if (contentLength && response.status === 200) {
+        // If status is 200, it means the server ignored Range and sent the whole file.
+        // We can use this size, but reading chunks later will be inefficient (downloading full file every time).
+        console.warn('Server ignored Range header (200 OK). Analysis might be slow.');
+        return parseInt(contentLength, 10);
+      }
+
+      // 3. Last resort fallback
+      if (contentLength) {
+        return parseInt(contentLength, 10);
+      }
+
+      throw new Error('Could not determine file size (Missing Content-Range and Content-Length)');
     };
 
-    const readChunk: ReadChunkFunc = async (
+    const readChunk = async (
       size: number,
       offset: number,
     ): Promise<Uint8Array> => {
-      // Check cache first
-      if (
-        cache &&
-        offset >= cache.start &&
-        offset + size <= cache.start + cache.data.byteLength
-      ) {
-        // onStatus(`Reading from cache: ${offset}-${offset + size}`);
-        const startIdx = offset - cache.start;
-        return cache.data.subarray(startIdx, startIdx + size);
-      }
+      onStatus(`Reading data (${offset}-${offset + size})...`);
 
-      // Calculate fetch size (prefetch)
-      // If requested size is larger than prefetch, fetch what's needed.
-      // Otherwise fetch prefetch size, but don't exceed fileSize.
-      let fetchSize = Math.max(size, PREFETCH_SIZE);
-      if (fileSize > 0 && offset + fetchSize > fileSize) {
-        fetchSize = fileSize - offset;
-      }
-
-      // If the remaining data is tiny or invalid, just fetch what is asked
-      if (fetchSize < size) fetchSize = size;
-
-      onStatus(
-        `Net Fetch: ${offset}-${offset + fetchSize} (${(
-          fetchSize /
-          1024 /
-          1024
-        ).toFixed(2)} MB)...`,
-      );
-
-      const response = await fetch(
-        `/resources/proxy?url=${encodeURIComponent(url)}`,
-        {
-          method: 'GET',
-          headers: {
-            Range: `bytes=${offset}-${offset + fetchSize - 1}`,
-          },
+      // We fetch a slightly larger chunk to reduce HTTP request overhead
+      // But for exactness we request what is needed.
+      const response = await fetch(proxyUrl, {
+        method: 'GET',
+        headers: {
+          Range: `bytes=${offset}-${offset + size - 1}`,
         },
-      );
+      });
 
       if (!response.ok) {
-        if (response.status !== 206) {
-          throw new Error(
-            `Expected Partial Content (206) but got ${response.status}. Upstream might not support Range requests.`,
-          );
-        }
-      } else if (response.status === 200) {
+        // Retry logic could go here
+        throw new Error(`Read error: ${response.statusText}`);
+      }
+
+      // Safety check: if server returns 200 instead of 206 during a read, 
+      // it means it's trying to send the WHOLE file again.
+      if (response.status === 200 && offset > 0) {
         throw new Error(
-          'Upstream returned 200 OK (Full File) instead of 206 Partial Content. Aborting to prevent full download.',
+          'Server does not support Range requests (returned 200 OK). Aborting to prevent full download.',
         );
       }
 
       const buffer = await response.arrayBuffer();
-      const data = new Uint8Array(buffer);
-
-      // Update cache
-      cache = {
-        start: offset,
-        data: data,
-      };
-
-      // Return the requested slice from the newly fetched data
-      // fetchSize >= size, so 0 to size
-      return data.subarray(0, size);
+      return new Uint8Array(buffer);
     };
 
+    // --- 4. Execute Analysis ---
     onStatus('Starting analysis...');
-    const result = await mediainfo.analyzeData(getSize, readChunk);
+    
+    // MediaInfo needs to know the file size first
+    const fileSize = await getSize();
+    
+    // Run the analysis using our custom read functions
+    const result = await mediainfo.analyzeData(() => fileSize, readChunk);
 
     if (typeof result === 'string') {
-      // "text", "HTML", "XML" return string
       onResult(result);
       onStatus('Analysis complete!');
       return result;
     } else {
-      // JSON or object return object
       const json = JSON.stringify(result, null, 2);
       onResult(json);
       onStatus('Analysis complete!');
       return json;
     }
   } catch (error) {
-    console.error('MediaInfo analysis failed:', error);
+    console.error('Analysis failed:', error);
+    onStatus('Error occurred.');
+    mediainfo.close();
     throw error;
   } finally {
-    mediainfo.close();
+    // Cleanup not strictly necessary as we close above on error, 
+    // but good practice if we reused the instance.
+    // mediainfo.close(); 
   }
 }
