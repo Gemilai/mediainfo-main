@@ -37,21 +37,23 @@ export async function analyzeMedia(
   const mediaInfoFactory = mediainfoModule.default as MediaInfoFactory;
   const mediainfo = await mediaInfoFactory({
     format,
-    coverData: false, // Optimisation: don't fetch cover art
+    coverData: false, // Save bandwidth
     full: true,
     locateFile: (path: string) => `/${path}`,
   });
 
-  // Keep track of total data usage
+  // Simple counter for UI
   let totalBytesDownloaded = 0;
 
   try {
     // --- 3. IO Handlers ---
 
     // A. Get Exact Size
+    // We strictly need the file size. If we guess, we get 416 errors.
     const getSize = async (): Promise<number> => {
       onStatus('Connecting...');
       
+      // Use GET 0-0 instead of HEAD to avoid 405 errors
       const response = await fetch(proxyUrl, {
         method: 'GET',
         headers: { Range: 'bytes=0-0' },
@@ -61,25 +63,28 @@ export async function analyzeMedia(
         throw new Error(`Connection failed: ${response.status} ${response.statusText}`);
       }
 
-      // Priority 1: Content-Range (Standard)
+      // Priority 1: Content-Range (Standard for Range requests)
+      // Format: bytes 0-0/123456
       const contentRange = response.headers.get('Content-Range');
       if (contentRange) {
         const match = contentRange.match(/\/(\d+)$/);
         if (match) return parseInt(match[1], 10);
       }
 
-      // Priority 2: Content-Length (Fallback)
+      // Priority 2: Content-Length
       const contentLength = response.headers.get('Content-Length');
       if (contentLength && response.status === 200) {
          return parseInt(contentLength, 10);
       }
 
-      throw new Error('Could not determine exact file size. Analysis cannot proceed.');
+      // If we cannot determine size, we MUST fail.
+      // Guessing (e.g. returning 10GB) causes 416 errors.
+      throw new Error('Could not determine file size. Server must support Range requests.');
     };
 
-    // B. Direct Reader (Fastest Method)
+    // B. Direct Chunk Reader
     const readChunk = async (size: number, offset: number): Promise<Uint8Array> => {
-      // Update UI with actual download amount
+      // Update UI
       totalBytesDownloaded += size;
       const mbRead = (totalBytesDownloaded / 1024 / 1024).toFixed(2);
       onStatus(`Analyzing... (${mbRead} MB read)`);
