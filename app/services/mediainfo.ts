@@ -37,46 +37,62 @@ export async function analyzeMedia(
   const mediaInfoFactory = mediainfoModule.default as MediaInfoFactory;
   const mediainfo = await mediaInfoFactory({
     format,
-    coverData: false,
+    coverData: false, // Skip cover art to save bandwidth
     full: true,
     locateFile: (path: string) => `/${path}`,
   });
 
-  // Trackers
+  // Running total of data downloaded
   let totalBytesDownloaded = 0;
 
   try {
     // --- 3. IO Handlers ---
 
-    // A. Get Size (Using GET 0-0 trick)
+    // A. Get File Size (Critical for MediaInfo to find the footer)
     const getSize = async (): Promise<number> => {
-      onStatus('Connecting...');
+      onStatus('Connecting to file...');
+      
+      // We use GET with Range: bytes=0-0. 
+      // This is safer than HEAD (which often fails with 405).
       const response = await fetch(proxyUrl, {
         method: 'GET',
         headers: { Range: 'bytes=0-0' },
       });
 
-      if (!response.ok) throw new Error(`Connection failed: ${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        throw new Error(`Connection failed: ${response.status} ${response.statusText}`);
+      }
 
+      // Priority 1: Content-Range (Standard for Range requests)
+      // Format: bytes 0-0/123456
       const contentRange = response.headers.get('Content-Range');
       if (contentRange) {
         const match = contentRange.match(/\/(\d+)$/);
-        if (match) return parseInt(match[1], 10);
+        if (match) {
+          return parseInt(match[1], 10);
+        }
       }
-      
-      const contentLength = response.headers.get('Content-Length');
-      if (contentLength) return parseInt(contentLength, 10);
 
-      // Fallback
-      return 1024 * 1024 * 1024 * 10; 
+      // Priority 2: Content-Length
+      const contentLength = response.headers.get('Content-Length');
+      if (contentLength) {
+        // If server returned 200 (ignored Range), this is the full size.
+        // If server returned 206, this is just 1 byte.
+        // We only use this if we are sure it's the full size or we have no choice.
+        if (response.status === 200) {
+           return parseInt(contentLength, 10);
+        }
+      }
+
+      throw new Error('Could not determine file size. Server must support Range requests.');
     };
 
-    // B. Direct Chunk Reader
+    // B. Chunk Reader (Fast & Simple)
     const readChunk = async (size: number, offset: number): Promise<Uint8Array> => {
-      // UI Update
+      // Update UI with running total
       totalBytesDownloaded += size;
       const mbRead = (totalBytesDownloaded / 1024 / 1024).toFixed(2);
-      onStatus(`Analyzing metadata... (${mbRead} MB read)`);
+      onStatus(`Analyzing... (${mbRead} MB downloaded)`);
 
       const response = await fetch(proxyUrl, {
         method: 'GET',
@@ -86,11 +102,10 @@ export async function analyzeMedia(
       });
 
       if (!response.ok) {
-        // Detailed error for debugging
         throw new Error(`Read error: ${response.status} ${response.statusText}`);
       }
 
-      // Safety check for server ignoring Range
+      // Check if server ignored Range and sent full file (Status 200)
       if (response.status === 200 && offset > 0) {
         throw new Error('Server returned full file (200) instead of partial (206). Aborting.');
       }
@@ -99,8 +114,10 @@ export async function analyzeMedia(
       return new Uint8Array(buffer);
     };
 
-    // --- 4. Run ---
+    // --- 4. Run Analysis ---
+    // We get size first, then pass it to analyzeData
     const fileSize = await getSize();
+    
     const result = await mediainfo.analyzeData(() => fileSize, readChunk);
 
     if (typeof result === 'string') {
