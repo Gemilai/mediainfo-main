@@ -7,15 +7,22 @@ type MediaInfoFactory = (opts: {
   locateFile?: (path: string, prefix: string) => string;
 }) => Promise<MediaInfo>;
 
+// We assume metadata is usually found within the first 5MB of read operations.
+// This is used ONLY for the progress bar calculation, not for limiting the read.
+const ESTIMATED_METADATA_WORKLOAD = 2 * 1024 * 1024; // 2MB "Target" for 100%
+
+// Minimum chunk size to fetch from network to speed up processing
+// Even if MediaInfo asks for 10 bytes, we fetch this much to avoid latency overhead.
+const MIN_FETCH_SIZE = 256 * 1024; // 256KB
+
 export async function analyzeMedia(
   url: string,
   onResult: (text: string) => void,
   onStatus: (status: string) => void,
   format: string = 'text',
 ): Promise<string> {
-  // --- 1. Validation Phase ---
+  // --- 1. Validation ---
   onStatus('Validating URL...');
-
   try {
     new URL(url);
   } catch {
@@ -25,7 +32,7 @@ export async function analyzeMedia(
   const PROXY_ENDPOINT = '/resources/proxy';
   const proxyUrl = `${PROXY_ENDPOINT}?url=${encodeURIComponent(url)}`;
 
-  // --- 2. Load MediaInfo Engine ---
+  // --- 2. Load Module ---
   onStatus('Loading MediaInfo engine...');
   let mediainfoModule: any;
   try {
@@ -43,99 +50,82 @@ export async function analyzeMedia(
     locateFile: (path: string) => `/${path}`,
   });
 
-  // State to track progress
-  let fileSize = 0;
+  // Trackers
   let totalBytesDownloaded = 0;
 
   try {
-    // --- 3. Define Smart IO Handlers ---
+    // --- 3. IO Handlers ---
 
-    // Function to get file size safely (Fixes the 405 Method Not Allowed error)
+    // A. Get Size (Using GET 0-0 trick to avoid 405 errors)
     const getSize = async (): Promise<number> => {
-      onStatus('Connecting to file...');
-
-      // We use GET with a 0-byte range instead of HEAD.
-      // This tricks servers that block HEAD requests into giving us the size.
+      onStatus('Connecting...');
       const response = await fetch(proxyUrl, {
         method: 'GET',
-        headers: {
-          Range: 'bytes=0-0',
-        },
+        headers: { Range: 'bytes=0-0' },
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to connect: ${response.status} ${response.statusText}`);
-      }
+      if (!response.ok) throw new Error(`Connection failed: ${response.status}`);
 
-      // 1. Try Content-Range (Reliable for Range requests)
-      // Format: bytes 0-0/12345678
       const contentRange = response.headers.get('Content-Range');
       if (contentRange) {
         const match = contentRange.match(/\/(\d+)$/);
-        if (match) {
-          return parseInt(match[1], 10);
-        }
+        if (match) return parseInt(match[1], 10);
       }
-
-      // 2. Fallback to Content-Length
+      
       const contentLength = response.headers.get('Content-Length');
-      if (contentLength) {
-        return parseInt(contentLength, 10);
-      }
+      if (contentLength) return parseInt(contentLength, 10);
 
-      throw new Error('Could not determine file size (Server missing size headers)');
+      // If unknown, return a safe large number, MediaInfo handles it
+      return 1024 * 1024 * 1024 * 10; 
     };
 
-    // Function to read specific chunks of the file
-    const readChunk = async (
-      size: number,
-      offset: number,
-    ): Promise<Uint8Array> => {
-      // Calculate percentage of TOTAL file downloaded so far
-      // This answers: "How much of the file did we actually have to fetch?"
+    // B. Smart Chunk Reader
+    const readChunk = async (size: number, offset: number): Promise<Uint8Array> => {
+      // 1. Calculate "Relative Percentage" for UI
       totalBytesDownloaded += size;
       
-      let progressText = '';
-      if (fileSize > 0) {
-        // Calculate percentage to 2 decimal places (e.g., "1.45%")
-        const percent = ((totalBytesDownloaded / fileSize) * 100).toFixed(2);
-        progressText = `(${percent}% read)`;
-      } else {
-        // Fallback if size is unknown
-        const mb = (totalBytesDownloaded / 1024 / 1024).toFixed(2);
-        progressText = `(${mb} MB read)`;
-      }
+      // Calculate 0-100% based on our "Estimated Workload" (2MB)
+      // If it goes over 100%, we cap it at 99% or show a spinner text.
+      let percent = Math.min(99, (totalBytesDownloaded / ESTIMATED_METADATA_WORKLOAD) * 100);
+      let percentStr = percent.toFixed(0);
+      
+      onStatus(`Analyzing... ${percentStr}%`);
 
-      // Show the cleaner status
-      onStatus(`Analyzing metadata... ${progressText}`);
-
+      // 2. Optimization: Fetch larger chunks than requested
+      // If MediaInfo asks for 100 bytes, fetching 100 bytes is slow due to network latency.
+      // We fetch at least MIN_FETCH_SIZE (256KB) unless we are near the end.
+      const fetchSize = Math.max(size, MIN_FETCH_SIZE);
+      
       const response = await fetch(proxyUrl, {
         method: 'GET',
         headers: {
-          Range: `bytes=${offset}-${offset + size - 1}`,
+          Range: `bytes=${offset}-${offset + fetchSize - 1}`,
         },
       });
 
       if (!response.ok) {
         throw new Error(`Read error: ${response.statusText}`);
       }
-
+      
+      // Check for full file download (server ignored Range)
       if (response.status === 200 && offset > 0) {
-        throw new Error(
-          'Server returned 200 OK (Full File) instead of 206 Partial Content. Aborting.',
-        );
+        throw new Error('Server returned full file (200) instead of partial (206). Aborting.');
       }
 
       const buffer = await response.arrayBuffer();
-      return new Uint8Array(buffer);
+      
+      // If we fetched more than needed (optimization), we need to slice it back
+      // to exactly what MediaInfo asked for.
+      const data = new Uint8Array(buffer);
+      
+      if (data.length > size) {
+         return data.subarray(0, size);
+      }
+      return data;
     };
 
-    // --- 4. Execute Analysis ---
-    
-    // Step A: Get size first so we can use it for progress bars
-    fileSize = await getSize();
-    
-    // Step B: Run analysis
+    // --- 4. Run ---
+    const fileSize = await getSize();
     const result = await mediainfo.analyzeData(() => fileSize, readChunk);
 
     if (typeof result === 'string') {
@@ -149,8 +139,8 @@ export async function analyzeMedia(
       return json;
     }
   } catch (error) {
-    console.error('Analysis failed:', error);
-    onStatus(error instanceof Error ? error.message : 'Error occurred');
+    console.error(error);
+    onStatus('Error occurred');
     mediainfo.close();
     throw error;
   }
