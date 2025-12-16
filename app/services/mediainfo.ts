@@ -13,7 +13,7 @@ export async function analyzeMedia(
   onStatus: (status: string) => void,
   format: string = 'text',
 ): Promise<string> {
-  // --- 1. Basic URL Validation ---
+  // --- 1. Validation ---
   onStatus('Validating URL...');
   try {
     new URL(url);
@@ -24,7 +24,7 @@ export async function analyzeMedia(
   const PROXY_ENDPOINT = '/resources/proxy';
   const proxyUrl = `${PROXY_ENDPOINT}?url=${encodeURIComponent(url)}`;
 
-  // --- 2. Load MediaInfo Engine ---
+  // --- 2. Load Module ---
   onStatus('Loading MediaInfo engine...');
   let mediainfoModule: any;
   try {
@@ -37,23 +37,36 @@ export async function analyzeMedia(
   const mediaInfoFactory = mediainfoModule.default as MediaInfoFactory;
   const mediainfo = await mediaInfoFactory({
     format,
-    coverData: false, // Optimization: don't fetch cover images
+    coverData: false, // Optimization: skip cover art
     full: true,
     locateFile: (path: string) => `/${path}`,
   });
 
-  // Track data usage for UI
+  // Track total bytes for UI
   let totalBytesDownloaded = 0;
 
   try {
     // --- 3. IO Handlers ---
 
-    // A. Get Exact File Size
-    // We strictly need the file size. Guessing causes 416 errors.
+    // A. Robust Size Detection
+    // This logic mirrors your original code (HEAD first) but fixes the 405 error
+    // by falling back to GET if HEAD fails.
     const getSize = async (): Promise<number> => {
       onStatus('Connecting to file...');
-      
-      // Use GET 0-0 instead of HEAD. This is robust and fixes 405 errors.
+
+      try {
+        // Method 1: Try HEAD (Fastest, works for most servers)
+        const response = await fetch(proxyUrl, { method: 'HEAD' });
+
+        if (response.ok) {
+          const contentLength = response.headers.get('Content-Length');
+          if (contentLength) return parseInt(contentLength, 10);
+        }
+      } catch (e) {
+        // Ignore HEAD error and try fallback
+      }
+
+      // Method 2: Fallback to GET 0-0 (Fixes 405 Method Not Allowed)
       const response = await fetch(proxyUrl, {
         method: 'GET',
         headers: { Range: 'bytes=0-0' },
@@ -63,27 +76,25 @@ export async function analyzeMedia(
         throw new Error(`Connection failed: ${response.status} ${response.statusText}`);
       }
 
-      // Priority 1: Content-Range (Standard for Range requests)
-      // Format: bytes 0-0/123456
       const contentRange = response.headers.get('Content-Range');
       if (contentRange) {
         const match = contentRange.match(/\/(\d+)$/);
         if (match) return parseInt(match[1], 10);
       }
-
-      // Priority 2: Content-Length
+      
       const contentLength = response.headers.get('Content-Length');
       if (contentLength && response.status === 200) {
          return parseInt(contentLength, 10);
       }
 
-      // If we cannot determine size, we MUST fail here.
-      throw new Error('Could not determine file size. Server must support Range requests.');
+      throw new Error('Could not determine exact file size. Server must support Range requests.');
     };
 
-    // B. Direct Chunk Reader (Fastest Method - No Prefetching)
+    // B. Direct Chunk Reader (No Prefetching)
+    // Removed cache/prefetch logic to fix the 10-second delay.
+    // It now reads exactly what MediaInfo asks for.
     const readChunk: ReadChunkFunc = async (size: number, offset: number): Promise<Uint8Array> => {
-      // Update UI with actual download amount
+      // Simple UI Counter
       totalBytesDownloaded += size;
       const mbRead = (totalBytesDownloaded / 1024 / 1024).toFixed(2);
       onStatus(`Analyzing... (${mbRead} MB read)`);
@@ -96,10 +107,10 @@ export async function analyzeMedia(
       });
 
       if (!response.ok) {
+        // This is where the 416 error usually happens if size was wrong
         throw new Error(`Read error: ${response.status} ${response.statusText}`);
       }
 
-      // If server ignores Range and sends 200 OK (Full File), abort to save bandwidth
       if (response.status === 200 && offset > 0) {
         throw new Error('Server returned full file (200) instead of partial (206). Aborting.');
       }
@@ -110,7 +121,6 @@ export async function analyzeMedia(
 
     // --- 4. Run Analysis ---
     const fileSize = await getSize();
-    
     const result = await mediainfo.analyzeData(() => fileSize, readChunk);
 
     if (typeof result === 'string') {
