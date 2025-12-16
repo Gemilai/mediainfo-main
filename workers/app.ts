@@ -30,7 +30,7 @@ export default {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
         'Access-Control-Allow-Headers': 'Range, Content-Type, User-Agent',
-        // We explicitly do NOT expose Content-Disposition to prevent download managers from triggering
+        // Expose headers needed for MediaInfo
         'Access-Control-Expose-Headers':
           'Content-Length, Content-Range, Content-Type, Accept-Ranges',
       };
@@ -52,11 +52,11 @@ export default {
         const upstreamUrl = new URL(targetUrl);
         const headers = new Headers(request.headers);
         
-        // Clean up headers to prevent host mismatches
+        // Clean up headers
         headers.set('Host', upstreamUrl.hostname);
         headers.set('Referer', upstreamUrl.origin);
         headers.delete('Origin'); 
-        headers.delete('Cookie'); // Privacy: don't pass cookies
+        headers.delete('Cookie');
 
         const upstreamResponse = await fetch(targetUrl, {
           method: request.method,
@@ -66,11 +66,10 @@ export default {
 
         const responseHeaders = new Headers();
         
-        // Allowed headers to pass through
+        // Allowed headers
         const allowedHeaders = [
           'content-length',
           'content-range',
-          'content-type',
           'accept-ranges',
           'last-modified',
           'etag'
@@ -82,11 +81,16 @@ export default {
           }
         }
 
-        // FORCE overrides to stop IDM/Download Managers
-        // 1. Remove Content-Disposition (this is what triggers "Save As")
+        // --- IDM Countermeasures ---
+        // 1. Remove "attachment" directives
         responseHeaders.delete('content-disposition');
         
-        // 2. Ensure CORS headers are present
+        // 2. Force generic binary type.
+        // If we send "video/mp4", IDM is more likely to grab it.
+        // "application/octet-stream" is boring and less likely to trigger sniffers.
+        responseHeaders.set('content-type', 'application/octet-stream');
+        
+        // 3. Ensure CORS headers are present
         Object.entries(corsHeaders).forEach(([key, value]) => {
           responseHeaders.set(key, value);
         });
