@@ -101,7 +101,8 @@ export default {
           `Proxy error: ${
             error instanceof Error ? error.message : 'Unknown error'
           }`,
-          {\n            status: 502,
+          {
+            status: 502,
             headers: corsHeaders,
           },
         );
