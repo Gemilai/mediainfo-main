@@ -1,4 +1,4 @@
-import type { MediaInfo } from 'mediainfo.js';
+import type { MediaInfo, ReadChunkFunc } from 'mediainfo.js';
 
 type MediaInfoFactory = (opts: {
   format: 'text' | 'json' | 'object' | 'XML' | 'MAXML' | 'HTML' | string;
@@ -13,7 +13,7 @@ export async function analyzeMedia(
   onStatus: (status: string) => void,
   format: string = 'text',
 ): Promise<string> {
-  // --- 1. Validation ---
+  // --- 1. Basic URL Validation ---
   onStatus('Validating URL...');
   try {
     new URL(url);
@@ -24,7 +24,7 @@ export async function analyzeMedia(
   const PROXY_ENDPOINT = '/resources/proxy';
   const proxyUrl = `${PROXY_ENDPOINT}?url=${encodeURIComponent(url)}`;
 
-  // --- 2. Load Module ---
+  // --- 2. Load MediaInfo Engine ---
   onStatus('Loading MediaInfo engine...');
   let mediainfoModule: any;
   try {
@@ -37,23 +37,23 @@ export async function analyzeMedia(
   const mediaInfoFactory = mediainfoModule.default as MediaInfoFactory;
   const mediainfo = await mediaInfoFactory({
     format,
-    coverData: false, // Save bandwidth
+    coverData: false, // Optimization: don't fetch cover images
     full: true,
     locateFile: (path: string) => `/${path}`,
   });
 
-  // Simple counter for UI
+  // Track data usage for UI
   let totalBytesDownloaded = 0;
 
   try {
     // --- 3. IO Handlers ---
 
-    // A. Get Exact Size
-    // We strictly need the file size. If we guess, we get 416 errors.
+    // A. Get Exact File Size
+    // We strictly need the file size. Guessing causes 416 errors.
     const getSize = async (): Promise<number> => {
-      onStatus('Connecting...');
+      onStatus('Connecting to file...');
       
-      // Use GET 0-0 instead of HEAD to avoid 405 errors
+      // Use GET 0-0 instead of HEAD. This is robust and fixes 405 errors.
       const response = await fetch(proxyUrl, {
         method: 'GET',
         headers: { Range: 'bytes=0-0' },
@@ -77,14 +77,13 @@ export async function analyzeMedia(
          return parseInt(contentLength, 10);
       }
 
-      // If we cannot determine size, we MUST fail.
-      // Guessing (e.g. returning 10GB) causes 416 errors.
+      // If we cannot determine size, we MUST fail here.
       throw new Error('Could not determine file size. Server must support Range requests.');
     };
 
-    // B. Direct Chunk Reader
-    const readChunk = async (size: number, offset: number): Promise<Uint8Array> => {
-      // Update UI
+    // B. Direct Chunk Reader (Fastest Method - No Prefetching)
+    const readChunk: ReadChunkFunc = async (size: number, offset: number): Promise<Uint8Array> => {
+      // Update UI with actual download amount
       totalBytesDownloaded += size;
       const mbRead = (totalBytesDownloaded / 1024 / 1024).toFixed(2);
       onStatus(`Analyzing... (${mbRead} MB read)`);
@@ -100,6 +99,7 @@ export async function analyzeMedia(
         throw new Error(`Read error: ${response.status} ${response.statusText}`);
       }
 
+      // If server ignores Range and sends 200 OK (Full File), abort to save bandwidth
       if (response.status === 200 && offset > 0) {
         throw new Error('Server returned full file (200) instead of partial (206). Aborting.');
       }
@@ -108,8 +108,9 @@ export async function analyzeMedia(
       return new Uint8Array(buffer);
     };
 
-    // --- 4. Run ---
+    // --- 4. Run Analysis ---
     const fileSize = await getSize();
+    
     const result = await mediainfo.analyzeData(() => fileSize, readChunk);
 
     if (typeof result === 'string') {
