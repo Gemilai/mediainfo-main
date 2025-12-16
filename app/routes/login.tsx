@@ -13,10 +13,10 @@ export async function action({ request, context }: Route.ActionArgs) {
   const username = formData.get('username');
   const password = formData.get('password');
 
-  // Simple check - in production use context.cloudflare.env.AUTH_PASSWORD
-  // Default: admin / password
-  const validUser = context.cloudflare?.env?.AUTH_USER || 'admin';
-  const validPass = context.cloudflare?.env?.AUTH_PASS || 'password';
+  // Load from Cloudflare Variables
+  // If variables aren't set, default to admin/password for safety/testing
+  const validUser = context.cloudflare.env.AUTH_USER || 'admin';
+  const validPass = context.cloudflare.env.AUTH_PASS || 'password';
 
   if (username === validUser && password === validPass) {
     return createUserSession('/');
