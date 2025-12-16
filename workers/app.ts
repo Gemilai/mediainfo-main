@@ -30,7 +30,7 @@ export default {
         'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
         'Access-Control-Allow-Headers': 'Range, Content-Type, User-Agent',
         'Access-Control-Expose-Headers':
-          'Content-Length, Content-Range, Content-Type, Accept-Ranges',
+          'Content-Length, Content-Range, Content-Type, Accept-Ranges, Content-Disposition',
       };
 
       if (request.method === 'OPTIONS') {
@@ -38,7 +38,10 @@ export default {
       }
 
       if (!targetUrl) {
-        return new Response("Missing 'url'", { status: 400, headers: corsHeaders });
+        return new Response("Missing 'url' query parameter", {
+          status: 400,
+          headers: corsHeaders,
+        });
       }
 
       try {
@@ -58,10 +61,16 @@ export default {
 
         const responseHeaders = new Headers();
         
-        // Copy safe headers
+        // --- ORIGINAL ROBUST LOGIC ---
+        // Copy all headers except those we need to manage manually.
         const skipHeaders = [
-          'content-encoding', 'content-length', 'transfer-encoding', 
-          'connection', 'keep-alive', 'content-disposition', 'content-type'
+          'content-encoding', 
+          'content-length', 
+          'transfer-encoding', 
+          'connection', 
+          'keep-alive',
+          'content-disposition', // We handle this
+          'content-type'         // We handle this
         ];
 
         for (const [key, value] of upstreamResponse.headers.entries()) {
@@ -70,13 +79,13 @@ export default {
           }
         }
 
-        // --- ANTI-DOWNLOAD MEASURES ---
-        // 1. Force generic binary type (hides "video/mp4" from IDM)
-        responseHeaders.set('content-type', 'application/octet-stream');
-        // 2. Remove attachment disposition
+        // --- IDM / DOWNLOAD POPUP FIX ---
+        // 1. Remove "attachment" directive
         responseHeaders.delete('content-disposition');
+        // 2. Force generic binary type (hides "video/mp4" from IDM)
+        responseHeaders.set('content-type', 'application/octet-stream');
 
-        // Restore critical sizing headers
+        // Restore Critical Sizing Headers
         if (upstreamResponse.headers.has('Content-Length')) {
           responseHeaders.set('Content-Length', upstreamResponse.headers.get('Content-Length')!);
         }
@@ -84,6 +93,7 @@ export default {
           responseHeaders.set('Content-Range', upstreamResponse.headers.get('Content-Range')!);
         }
 
+        // Add CORS
         Object.entries(corsHeaders).forEach(([key, value]) => {
           responseHeaders.set(key, value);
         });
@@ -94,13 +104,14 @@ export default {
           headers: responseHeaders,
         });
       } catch (error) {
-        return new Response(`Proxy error: ${error instanceof Error ? error.message : 'Unknown'}`, {
-          status: 502,
-          headers: corsHeaders,
-        });
+        return new Response(
+          `Proxy error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          { status: 502, headers: corsHeaders }
+        );
       }
     }
 
+    // Default Remix handler
     return requestHandler(request, {
       cloudflare: { env, ctx },
     });
