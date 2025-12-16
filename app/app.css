@@ -12,8 +12,32 @@ body {
   margin: 0;
   padding: 0;
   color: #f5f5f7;
-  background-color: #000000; /* Ensure strictly black background */
+  background-color: #050505; /* Deep black/grey */
   color-scheme: dark;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* --- New Sleek Scrollbars --- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 5px;
+  border: 2px solid #0f0f0f; /* Creates padding effect */
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
