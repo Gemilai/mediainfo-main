@@ -37,24 +37,25 @@ export async function analyzeMedia(
   const mediaInfoFactory = mediainfoModule.default as MediaInfoFactory;
   const mediainfo = await mediaInfoFactory({
     format,
-    coverData: false, // Optimization: skip cover art
-    full: true,
+    coverData: false, 
+    // CRITICAL FIX: Set full to false to get clean, standard output
+    // "full: true" produces the verbose debug output you disliked.
+    full: false, 
     locateFile: (path: string) => `/${path}`,
   });
 
-  // --- 3. The "Fast" Logic (Cache + Prefetch) ---
-  // We keep the logic from 'working.ts' that made it fast.
+  // --- 3. Fast Logic (Cache + Prefetch) ---
   let fileSize = 0;
   let cache: { start: number; data: Uint8Array } | null = null;
   const PREFETCH_SIZE = 2 * 1024 * 1024; // 2MB Chunk Size
   let totalBytesDownloaded = 0;
 
   try {
-    // A. Robust Size Detection (Fixes 405 Error)
+    // A. Robust Size Detection
     const getSize = async (): Promise<number> => {
       onStatus('Connecting...');
 
-      // Attempt 1: HEAD (Fastest)
+      // Attempt 1: HEAD
       try {
         const response = await fetch(proxyUrl, { method: 'HEAD' });
         if (response.ok) {
@@ -64,11 +65,9 @@ export async function analyzeMedia(
              return fileSize;
           }
         }
-      } catch (e) {
-        // Ignore HEAD failure, proceed to fallback
-      }
+      } catch (e) {}
 
-      // Attempt 2: GET Range 0-0 (Fallback for 405 errors)
+      // Attempt 2: GET Range 0-0
       const response = await fetch(proxyUrl, {
         method: 'GET',
         headers: { Range: 'bytes=0-0' },
@@ -78,7 +77,6 @@ export async function analyzeMedia(
         throw new Error(`Connection failed: ${response.status} ${response.statusText}`);
       }
 
-      // Check Content-Range first
       const contentRange = response.headers.get('Content-Range');
       if (contentRange) {
         const match = contentRange.match(/\/(\d+)$/);
@@ -88,7 +86,6 @@ export async function analyzeMedia(
         }
       }
 
-      // Check Content-Length (fallback)
       const contentLength = response.headers.get('Content-Length');
       if (contentLength && response.status === 200) {
          fileSize = parseInt(contentLength, 10);
@@ -98,9 +95,8 @@ export async function analyzeMedia(
       throw new Error('Could not determine file size.');
     };
 
-    // B. Fast Chunk Reader (With Prefetching)
+    // B. Fast Chunk Reader
     const readChunk: ReadChunkFunc = async (size: number, offset: number): Promise<Uint8Array> => {
-      // 1. Check Cache
       if (
         cache &&
         offset >= cache.start &&
@@ -110,24 +106,16 @@ export async function analyzeMedia(
         return cache.data.subarray(startIdx, startIdx + size);
       }
 
-      // 2. Calculate Prefetch
-      // We read a bigger chunk (2MB) than asked to reduce network requests
       let fetchSize = Math.max(size, PREFETCH_SIZE);
-      
-      // Don't read past end of file
       if (fileSize > 0 && offset + fetchSize > fileSize) {
         fetchSize = fileSize - offset;
       }
-      // Safety: ensure we at least read what is asked
       if (fetchSize < size) fetchSize = size;
 
-      // 3. Update UI
-      // We track actual network usage (overhead), not just what MediaInfo asked for
       totalBytesDownloaded += fetchSize;
       const mbRead = (totalBytesDownloaded / 1024 / 1024).toFixed(2);
       onStatus(`Analyzing... (${mbRead} MB downloaded)`);
 
-      // 4. Fetch
       const response = await fetch(proxyUrl, {
         method: 'GET',
         headers: {
@@ -140,20 +128,17 @@ export async function analyzeMedia(
       }
       
       if (response.status === 200 && offset > 0) {
-         // Critical check: If server sends full file, stop immediately
          throw new Error('Server does not support partial requests (200 OK). Aborting.');
       }
 
       const buffer = await response.arrayBuffer();
       const data = new Uint8Array(buffer);
 
-      // 5. Update Cache
       cache = {
         start: offset,
         data: data,
       };
 
-      // Return only the requested slice
       return data.subarray(0, size);
     };
 
