@@ -19,12 +19,14 @@ export default {
     const url = new URL(request.url);
 
     // Proxy logic
+    // console.log("Incoming request:", url.pathname, url.searchParams.toString());
     if (
       url.pathname === '/resources/proxy' ||
       url.pathname.startsWith('/resources/proxy')
     ) {
       const targetUrl = url.searchParams.get('url');
 
+      // CORS headers
       const corsHeaders = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -34,7 +36,9 @@ export default {
       };
 
       if (request.method === 'OPTIONS') {
-        return new Response(null, { headers: corsHeaders });
+        return new Response(null, {
+          headers: corsHeaders,
+        });
       }
 
       if (!targetUrl) {
@@ -46,30 +50,53 @@ export default {
 
       try {
         const upstreamUrl = new URL(targetUrl);
-        const headers = new Headers(request.headers);
-        
-        headers.set('Host', upstreamUrl.hostname);
-        headers.set('Referer', upstreamUrl.origin);
-        headers.delete('Origin'); 
-        headers.delete('Cookie');
+        // Basic validation
+        if (!['http:', 'https:'].includes(upstreamUrl.protocol)) {
+          return new Response('Invalid protocol', {
+            status: 400,
+            headers: corsHeaders,
+          });
+        }
 
-        const upstreamResponse = await fetch(targetUrl, {
+        const upstreamHeaders = new Headers();
+
+        // Forward key headers
+        const allowedReqHeaders = [
+          'Range',
+          'User-Agent',
+          'Accept',
+          'Accept-Encoding',
+        ];
+        for (const header of allowedReqHeaders) {
+          const val = request.headers.get(header);
+          if (val) upstreamHeaders.set(header, val);
+        }
+
+        // Always set a default User-Agent if none provided, to avoid blocking
+        if (!upstreamHeaders.has('User-Agent')) {
+          upstreamHeaders.set(
+            'User-Agent',
+            'MediaPeek/1.0 (Cloudflare Worker)',
+          );
+        }
+
+        const upstreamResponse = await fetch(upstreamUrl.toString(), {
           method: request.method,
-          headers: headers,
+          headers: upstreamHeaders,
           redirect: 'follow',
         });
 
+        // Create response headers to forward
         const responseHeaders = new Headers();
-        
-        // Copy most headers (Robust Blocklist Method)
+
+        // Copy upstream headers but filter out hop-by-hop or problematic ones
         const skipHeaders = [
-          'content-encoding', 
-          'content-length', 
-          'transfer-encoding', 
-          'connection', 
+          'content-encoding', // Let the worker/browser handle this
+          'content-security-policy',
+          'access-control-allow-origin', // We set our own
+          'transfer-encoding',
+          'connection',
           'keep-alive',
-          'content-disposition', // We handle this manually
-          'content-type'         // We handle this manually
         ];
 
         for (const [key, value] of upstreamResponse.headers.entries()) {
@@ -78,21 +105,15 @@ export default {
           }
         }
 
-        // --- IDM FIX ---
-        responseHeaders.delete('content-disposition'); // No attachment
-        responseHeaders.set('content-type', 'application/octet-stream'); // Generic binary
-
-        // Restore Critical Headers
-        if (upstreamResponse.headers.has('Content-Length')) {
-          responseHeaders.set('Content-Length', upstreamResponse.headers.get('Content-Length')!);
-        }
-        if (upstreamResponse.headers.has('Content-Range')) {
-          responseHeaders.set('Content-Range', upstreamResponse.headers.get('Content-Range')!);
-        }
-
+        // Ensure CORS headers are set/overwritten
         Object.entries(corsHeaders).forEach(([key, value]) => {
           responseHeaders.set(key, value);
         });
+
+        // Strictly check for Range support if we requested it
+        // If we requested bytes=0-100 and got 200 OK (full file), we might want to warn or error?
+        // But for stream passthrough, we just return what we got.
+        // The client-side (mediainfo.ts) logic will now handle the 200 vs 206 check and abort if needed.
 
         return new Response(upstreamResponse.body, {
           status: upstreamResponse.status,
@@ -101,12 +122,18 @@ export default {
         });
       } catch (error) {
         return new Response(
-          `Proxy error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          { status: 502, headers: corsHeaders }
+          `Proxy error: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`,
+          {
+            status: 502,
+            headers: corsHeaders,
+          },
         );
       }
     }
 
+    // Default Remix handler
     return requestHandler(request, {
       cloudflare: { env, ctx },
     });
