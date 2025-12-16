@@ -1,5 +1,7 @@
 import type { MetaFunction } from 'react-router';
+import { Form } from 'react-router'; // Import Form for the logout action
 import { motion } from 'motion/react';
+import { LogOut } from 'lucide-react'; // Import Icon
 import { MediaForm } from '../components/media-form';
 import { requireUserSession } from '../services/session.server';
 import type { Route } from './+types/_index';
@@ -13,7 +15,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   return null;
 }
 
-// Animation variants for background elements
+// Animation variants
 const floatAnimation = {
   initial: { x: 0, y: 0 },
   animate: {
@@ -27,26 +29,26 @@ const floatAnimation = {
   },
 };
 
-const pulseAnimation = {
-  animate: {
-    opacity: [0.3, 0.6, 0.3],
-    scale: [1, 1.2, 1],
-    transition: {
-      duration: 8,
-      repeat: Infinity,
-      ease: 'easeInOut',
-    },
-  },
-};
-
 export default function Index() {
   return (
     <div className="relative flex min-h-screen w-full flex-col items-center overflow-hidden bg-black font-sans text-gray-200">
       
-      {/* --- MOVING BACKGROUND LAYER --- */}
+      {/* --- LOGOUT BUTTON (Top Right) --- */}
+      <div className="absolute right-6 top-6 z-50">
+        <Form action="/logout" method="post">
+          <button
+            type="submit"
+            className="group flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-gray-400 backdrop-blur-md transition-all hover:bg-white/10 hover:text-white hover:border-white/20 active:scale-95"
+          >
+            <span>Logout</span>
+            <LogOut className="h-3.5 w-3.5 opacity-70 transition-opacity group-hover:opacity-100" />
+          </button>
+        </Form>
+      </div>
+
+      {/* --- BACKGROUND LAYER --- */}
       <div className="absolute inset-0 z-0 overflow-hidden">
-        
-        {/* 1. Moving Grid (Forward Simulation) */}
+        {/* Moving Grid */}
         <motion.div 
           initial={{ backgroundPosition: '0px 0px' }}
           animate={{ backgroundPosition: '0px 100px' }}
@@ -55,12 +57,12 @@ export default function Index() {
           style={{
             backgroundImage: 'linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px)',
             backgroundSize: '100px 100px',
-            maskImage: 'linear-gradient(to bottom, transparent, 10%, black 40%, transparent 95%)', // Fade out top/bottom
-            transform: 'perspective(500px) rotateX(60deg) scale(2)' // 3D Tilt
+            maskImage: 'linear-gradient(to bottom, transparent, 10%, black 40%, transparent 95%)',
+            transform: 'perspective(500px) rotateX(60deg) scale(2)'
           }}
         />
 
-        {/* 2. Floating Nebula Blobs */}
+        {/* Floating Nebulas */}
         <motion.div
           variants={floatAnimation}
           initial="initial"
@@ -75,26 +77,6 @@ export default function Index() {
           }}
           className="absolute -right-[10%] bottom-[10%] h-[500px] w-[500px] rounded-full bg-indigo-900/20 blur-[120px]"
         />
-
-        {/* 3. Twinkling Stars */}
-        <div className="absolute inset-0">
-           {/* We create a few "stars" manually for performance rather than 100s of divs */}
-           <motion.div 
-             animate={{ opacity: [0.2, 1, 0.2] }} 
-             transition={{ duration: 3, repeat: Infinity }}
-             className="absolute top-1/4 left-1/4 h-1 w-1 bg-white shadow-[0_0_10px_white] rounded-full" 
-           />
-           <motion.div 
-             animate={{ opacity: [0.2, 1, 0.2] }} 
-             transition={{ duration: 4, repeat: Infinity, delay: 1 }}
-             className="absolute top-1/3 right-1/3 h-0.5 w-0.5 bg-blue-400 shadow-[0_0_10px_blue] rounded-full" 
-           />
-           <motion.div 
-             animate={{ opacity: [0.1, 0.8, 0.1] }} 
-             transition={{ duration: 5, repeat: Infinity, delay: 2 }}
-             className="absolute bottom-1/3 left-1/2 h-1 w-1 bg-purple-400 shadow-[0_0_10px_purple] rounded-full" 
-           />
-        </div>
       </div>
 
       {/* --- CONTENT LAYER --- */}
@@ -102,7 +84,6 @@ export default function Index() {
         
         {/* Header */}
         <div className="mb-12 flex flex-col items-center text-center">
-          {/* Logo Icon */}
           <motion.div 
             initial={{ scale: 0.8, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
@@ -114,7 +95,6 @@ export default function Index() {
             </svg>
           </motion.div>
 
-          {/* Title */}
           <motion.h1 
             initial={{ y: 20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
@@ -124,7 +104,6 @@ export default function Index() {
             MediaInfo
           </motion.h1>
 
-          {/* Subtitle */}
           <motion.p 
             initial={{ y: 20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
